@@ -1,0 +1,55 @@
+name: Update reddit
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/update.yml]
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable tag; leave empty for latest
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-reddit
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Download and validate published formula
+        run: |
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo reddit-rs/reddit --json tagName --jq .tagName)
+          fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release download "$TAG" --repo reddit-rs/reddit --pattern reddit.rb --dir generated
+          ruby -c generated/reddit.rb
+          export TAG
+          ruby -e 'requested = ENV.fetch("TAG").delete_prefix("v"); actual = File.read("generated/reddit.rb")[/^\s+version "([^"]+)"/, 1]; abort "Formula version differs from release tag" unless actual == requested'
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Update without downgrading versions
+        run: |
+          if ruby -e 'require "rubygems"; current = File.read("Formula/reddit.rb")[/^\s+version "([^"]+)"/, 1]; requested = ENV.fetch("TAG").delete_prefix("v"); exit(current && Gem::Version.new(current) > Gem::Version.new(requested) ? 0 : 1)'; then
+            echo 'A newer version is already available.'
+            exit 0
+          fi
+          cp generated/reddit.rb Formula/reddit.rb
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/reddit.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update reddit to $TAG"
+            git push origin HEAD:main
+          fi
